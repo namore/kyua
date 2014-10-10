@@ -51,6 +51,7 @@
 #include "utils/optional.ipp"
 #include "utils/sanity.hpp"
 
+namespace config = utils::config;
 namespace datetime = utils::datetime;
 namespace fs = utils::fs;
 namespace runner = engine::runner;
@@ -174,8 +175,11 @@ public:
     /// \param build_root_ The root directory of the test programs.
     /// \param relative_filename_ Name of the Kyuafile to load relative to
     ///     source_root_.
+    /// \param user_config User configuration holding any test suite properties
+    ///     to be passed to the list operation.
     parser(const fs::path& source_root_, const fs::path& build_root_,
-           const fs::path& relative_filename_) :
+           const fs::path& relative_filename_,
+           const config::tree& user_config) :
         _source_root(source_root_), _build_root(build_root_),
         _relative_filename(relative_filename_)
     {
@@ -183,13 +187,17 @@ public:
 
         _state.push_cxx_function(lua_syntax);
         _state.set_global("syntax");
+
         *_state.new_userdata< parser* >() = this;
         _state.set_global("_parser");
 
         _state.push_cxx_function(lua_current_kyuafile);
         _state.set_global("current_kyuafile");
-        _state.push_cxx_function(lua_include);
+
+        *_state.new_userdata< config::tree >() = user_config;
+        _state.push_cxx_closure(lua_include, 1);
         _state.set_global("include");
+
         _state.push_cxx_function(lua_test_suite);
         _state.set_global("test_suite");
 
@@ -200,7 +208,8 @@ public:
             const std::string& interface = *iter;
 
             _state.push_string(interface);
-            _state.push_cxx_closure(lua_generic_test_program, 1);
+            *_state.new_userdata< config::tree >() = user_config;
+            _state.push_cxx_closure(lua_generic_test_program, 2);
             _state.set_global(interface + "_test_program");
         }
 
@@ -247,13 +256,16 @@ public:
     /// the included file.
     ///
     /// \param raw_file Path to the file to include.
+    /// \param user_config User configuration holding any test suite properties
+    ///     to be passed to the list operation.
     void
-    callback_include(const fs::path& raw_file)
+    callback_include(const fs::path& raw_file,
+                     const config::tree& user_config)
     {
         const fs::path file = relativize(_relative_filename.branch_path(),
                                          raw_file);
         const model::test_programs_vector subtps =
-            parser(_source_root, _build_root, file).parse();
+            parser(_source_root, _build_root, file, user_config).parse();
 
         std::copy(subtps.begin(), subtps.end(),
                   std::back_inserter(_test_programs));
@@ -292,6 +304,8 @@ public:
     /// \param test_suite_override Name of the test suite this test program
     ///     belongs to, if explicitly defined at the test program level.
     /// \param metadata Metadata variables passed to the test program.
+    /// \param user_config User configuration holding any test suite properties
+    ///     to be passed to the list operation.
     ///
     /// \throw std::runtime_error If the test program definition is invalid or
     ///     if the test program does not exist.
@@ -299,7 +313,8 @@ public:
     callback_test_program(const std::string& interface,
                           const fs::path& raw_path,
                           const std::string& test_suite_override,
-                          const model::metadata& metadata)
+                          const model::metadata& metadata,
+                          const config::tree& user_config)
     {
         if (raw_path.is_absolute())
             throw std::runtime_error(F("Got unexpected absolute path for test "
@@ -318,7 +333,7 @@ public:
         _test_programs.push_back(model::test_program_ptr(
             new runner::lazy_test_program(interface, path, _build_root,
                                           get_test_suite(test_suite_override),
-                                          metadata)));
+                                          metadata, user_config)));
     }
 
     /// Callback for the Kyuafile test_suite() function.
@@ -395,6 +410,7 @@ ensure_valid_interface(const std::string& interface)
 /// special argument 'test_suite' provides an override to the global test suite
 /// name.  The rest of the arguments are part of the test program metadata.
 /// \pre state(upvalue 1) String with the name of the interface.
+/// \pre state(upvalue 2) User configuration with the per-test suite settings.
 ///
 /// \param state The Lua state that executed the function.
 ///
@@ -408,6 +424,12 @@ lua_generic_test_program(lutok::state& state)
         throw std::runtime_error("Found corrupt state for test_program "
                                  "function");
     const std::string interface = state.to_string(state.upvalue_index(1));
+
+    if (!state.is_userdata(state.upvalue_index(2)))
+        throw std::runtime_error("Found corrupt state for test_program "
+                                 "function");
+    const config::tree& user_config = *state.to_userdata< config::tree >(
+        state.upvalue_index(2));
 
     if (!state.is_table(-1))
         throw std::runtime_error(
@@ -462,7 +484,7 @@ lua_generic_test_program(lutok::state& state)
     }
 
     parser::get_from_state(state)->callback_test_program(
-        interface, path, test_suite, mdbuilder.build());
+        interface, path, test_suite, mdbuilder.build(), user_config);
     return 0;
 }
 
@@ -485,12 +507,20 @@ lua_current_kyuafile(lutok::state& state)
 ///
 /// \param state The Lua state that executed the function.
 ///
+/// \pre state(upvalue 2) User configuration with the per-test suite settings.
+///
 /// \return Number of return values left on the Lua stack.
 static int
 lua_include(lutok::state& state)
 {
+    if (!state.is_userdata(state.upvalue_index(1)))
+        throw std::runtime_error("Found corrupt state for test_program "
+                                 "function");
+    const config::tree& user_config = *state.to_userdata< config::tree >(
+        state.upvalue_index(1));
+
     parser::get_from_state(state)->callback_include(
-        fs::path(state.to_string(-1)));
+        fs::path(state.to_string(-1)), user_config);
     return 0;
 }
 
@@ -578,6 +608,8 @@ engine::kyuafile::~kyuafile(void)
 ///     containing the test programs themselves.  The layout of the build root
 ///     must match the layout of the source root (which is just the directory
 ///     from which the Kyuafile is being read).
+/// \param user_config User configuration holding any test suite properties
+///     to be passed to the list operation.
 ///
 /// \return High-level representation of the configuration file.
 ///
@@ -585,7 +617,8 @@ engine::kyuafile::~kyuafile(void)
 ///     file access errors and syntax errors.
 engine::kyuafile
 engine::kyuafile::load(const fs::path& file,
-                       const optional< fs::path > user_build_root)
+                       const optional< fs::path > user_build_root,
+                       const config::tree& user_config)
 {
     const fs::path source_root_ = file.branch_path();
     const fs::path build_root_ = user_build_root ?
@@ -593,7 +626,7 @@ engine::kyuafile::load(const fs::path& file,
 
     return kyuafile(source_root_, build_root_,
                     parser(source_root_, build_root_,
-                           fs::path(file.leaf_name())).parse());
+                           fs::path(file.leaf_name()), user_config).parse());
 }
 
 

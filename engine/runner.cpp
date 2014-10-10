@@ -153,12 +153,15 @@ setup_lua_state(lutok::state& state,
 /// Loads the list of test cases from a test program.
 ///
 /// \param test_program Representation of the test program to load.
+/// \param vars Configuration variables to pass to the test program.
 ///
 /// \return A list of test cases.
 static model::test_cases_map
-load_test_cases(const model::test_program& test_program)
+load_test_cases(const model::test_program& test_program,
+                const std::map< std::string, std::string >& vars)
 {
-    const engine::tester tester(test_program.interface_name(), none, none);
+    const engine::tester tester(test_program.interface_name(), none, none,
+                                vars);
     const std::string output = tester.list(test_program.absolute_path());
 
     model::test_cases_map test_cases;
@@ -234,6 +237,9 @@ create_tester(const std::string& interface_name,
 
 /// Internal implementation of a lazy_test_program.
 struct engine::runner::lazy_test_program::impl {
+    /// User configuration to pass to the test program list operation.
+    std::map< std::string, std::string > _vars;
+
     /// Collection of test cases; lazy loaded.
     optional< model::test_cases_map > _test_cases;
 
@@ -251,15 +257,17 @@ struct engine::runner::lazy_test_program::impl {
 /// \param root_ The root of the test suite containing the test program.
 /// \param test_suite_name_ The name of the test suite this program belongs to.
 /// \param md_ Metadata of the test program.
+/// \param user_config_ User configuration to pass to the tester.
 runner::lazy_test_program::lazy_test_program(
     const std::string& interface_name_,
     const fs::path& binary_,
     const fs::path& root_,
     const std::string& test_suite_name_,
-    const model::metadata& md_) :
+    const model::metadata& md_,
+    const std::map< std::string, std::string >& vars_) :
     test_program(interface_name_, binary_, root_, test_suite_name_, md_,
                  model::test_cases_map()),
-    _pimpl(new impl())
+    _pimpl(new impl(vars_))
 {
 }
 
@@ -273,7 +281,7 @@ runner::lazy_test_program::test_cases(void) const
     if (!_pimpl->_test_cases) {
         model::test_cases_map tcs;
         try {
-            tcs = ::load_test_cases(*this);
+            tcs = ::load_test_cases(*this, _pimpl->_vars);
         } catch (const std::runtime_error& e) {
             // TODO(jmmv): This is a very ugly workaround for the fact that we
             // cannot report failures at the test-program level.  We should
